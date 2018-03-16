@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/want/0.0.1")]
+#![doc(html_root_url = "https://docs.rs/want/0.0.2")]
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
@@ -174,11 +174,13 @@ impl Giver {
     ///
     /// This is safe to call outside of a futures task context, but other
     /// means of being notified is left to the user.
+    #[inline]
     pub fn is_wanting(&self) -> bool {
         self.inner.state.load(Ordering::SeqCst) == State::Want.into()
     }
 
     /// Check if the `Taker` has canceled interest without parking a task.
+    #[inline]
     pub fn is_canceled(&self) -> bool {
         self.inner.state.load(Ordering::SeqCst) == State::Closed.into()
     }
@@ -199,17 +201,20 @@ impl Taker {
     ///
     /// This is useful to tell that the channel is closed if you cannot
     /// drop the value yet.
+    #[inline]
     pub fn cancel(&mut self) {
         trace!("signal: {:?}", State::Closed);
         self.signal(State::Closed)
     }
 
     /// Signal to the `Giver` that a value is wanted.
+    #[inline]
     pub fn want(&mut self) {
         trace!("signal: {:?}", State::Want);
         self.signal(State::Want)
     }
 
+    #[inline]
     fn signal(&mut self, state: State) {
         let old_state = self.inner.state.swap(state.into(), Ordering::SeqCst).into();
         match old_state {
@@ -235,6 +240,7 @@ impl Taker {
 }
 
 impl Drop for Taker {
+    #[inline]
     fn drop(&mut self) {
         self.signal(State::Closed);
     }
@@ -260,6 +266,7 @@ impl fmt::Debug for Closed {
 // ===== impl Inner ======
 
 impl Inner {
+    #[inline]
     fn state(&self) -> State {
         self.state.load(Ordering::SeqCst).into()
     }

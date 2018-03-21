@@ -145,10 +145,10 @@ impl Giver {
                             trace!("poll_want: taker doesn't want, parking task");
                             let current_waker = cx.waker();
                             let park = locked.as_ref()
-                                .map(|t| t.will_wake(&current_waker))
+                                .map(|t| t.will_wake(current_waker))
                                 .unwrap_or(true);
                             if park {
-                                mem::replace(&mut *locked, Some(current_waker))
+                                mem::replace(&mut *locked, Some(current_waker.clone()))
                                     .map(|prev_task| {
                                         // there was an old task parked here.
                                         // it might be waiting to be notified,

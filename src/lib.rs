@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{Async, Poll};
-use futures::task::{self, Task};
+use futures::task::{self, Waker};
 
 use try_lock::TryLock;
 
@@ -38,7 +38,7 @@ use try_lock::TryLock;
 pub fn new() -> (Giver, Taker) {
     let inner = Arc::new(Inner {
         state: AtomicUsize::new(State::Idle.into()),
-        task: TryLock::new(None),
+        waker: TryLock::new(None),
     });
     let inner2 = inner.clone();
     (
@@ -99,7 +99,7 @@ impl From<usize> for State {
 
 struct Inner {
     state: AtomicUsize,
-    task: TryLock<Option<Task>>,
+    waker: TryLock<Option<Waker>>,
 }
 
 // ===== impl Giver ======
@@ -112,7 +112,7 @@ impl Giver {
     ///   returns `Async::NotReady`, and parks the current task to be notified
     ///   when the `Taker` does call `want()`.
     /// - If the `Taker` has canceled (or dropped), this returns `Closed`.
-    pub fn poll_want(&mut self) -> Poll<(), Closed> {
+    pub fn poll_want(&mut self, cx: &mut task::Context) -> Poll<(), Closed> {
         loop {
             let state = self.inner.state.load(Ordering::SeqCst).into();
             match state {
@@ -132,7 +132,7 @@ impl Giver {
                 },
                 State::Idle | State::Give => {
                     // Taker doesn't want anything yet, so park.
-                    if let Some(mut locked) = self.inner.task.try_lock() {
+                    if let Some(mut locked) = self.inner.waker.try_lock() {
 
                         // While we have the lock, try to set to GIVE.
                         let old = self.inner.state.compare_and_swap(
@@ -143,19 +143,20 @@ impl Giver {
                         // If it's still the first state (Idle or Give), park current task.
                         if old == state.into() {
                             trace!("poll_want: taker doesn't want, parking task");
+                            let current_waker = cx.waker();
                             let park = locked.as_ref()
-                                .map(|t| t.will_notify_current())
+                                .map(|t| t.will_wake(current_waker))
                                 .unwrap_or(true);
                             if park {
-                                mem::replace(&mut *locked, Some(task::current()))
+                                mem::replace(&mut *locked, Some(current_waker.clone()))
                                     .map(|prev_task| {
                                         // there was an old task parked here.
                                         // it might be waiting to be notified,
                                         // so poke it before dropping.
-                                        prev_task.notify();
+                                        prev_task.wake();
                                     });
                             }
-                            return Ok(Async::NotReady)
+                            return Ok(Async::Pending)
                         }
                         // Otherwise, something happened! Go around the loop again.
                     } else {
@@ -221,10 +222,10 @@ impl Taker {
             State::Idle | State::Want | State::Closed => (),
             State::Give => {
                 loop {
-                    if let Some(mut locked) = self.inner.task.try_lock() {
-                        if let Some(task) = locked.take() {
+                    if let Some(mut locked) = self.inner.waker.try_lock() {
+                        if let Some(waker) = locked.take() {
                             trace!("signal found waiting giver, notifying");
-                            task.notify();
+                            waker.wake();
                         }
                         return;
                     } else {
@@ -276,15 +277,16 @@ impl Inner {
 mod tests {
     use std::thread;
     use futures::{Async, Stream};
-    use futures::future::{poll_fn, Future};
-    use futures::sync::{mpsc, oneshot};
+    use futures::future::poll_fn;
+    use futures::executor::block_on;
+    use futures::channel::{mpsc, oneshot};
     use super::*;
 
     #[test]
     fn want_ready() {
         let (mut gv, mut tk) = new();
         tk.want();
-        assert!(gv.poll_want().unwrap().is_ready());
+        assert!(block_on(poll_fn(|cx| gv.poll_want(cx))).is_ok());
     }
 
     #[test]
@@ -296,12 +298,12 @@ mod tests {
             tk.want();
             // use a oneshot to keep this thread alive
             // until other thread was notified of want
-            rx.wait().expect("rx");
+            block_on(rx).expect("rx");
         });
 
-        poll_fn(move || {
-            gv.poll_want()
-        }).wait().expect("wait");
+        block_on(poll_fn(move |cx| {
+            gv.poll_want(cx)
+        })).expect("wait");
         tx.send(()).expect("tx");
     }
 
@@ -315,7 +317,7 @@ mod tests {
         tk.cancel();
 
         assert!(gv.is_canceled());
-        assert!(gv.poll_want().is_err());
+        assert!(block_on(poll_fn(|cx| gv.poll_want(cx))).is_err());
 
         // implicit
         let (mut gv, tk) = new();
@@ -325,7 +327,7 @@ mod tests {
         drop(tk);
 
         assert!(gv.is_canceled());
-        assert!(gv.poll_want().is_err());
+        assert!(block_on(poll_fn(|cx| gv.poll_want(cx))).is_err());
 
         // notifies
         let (mut gv, tk) = new();
@@ -335,9 +337,9 @@ mod tests {
             // and dropped
         });
 
-        poll_fn(move || {
-            gv.poll_want()
-        }).wait().expect_err("wait");
+        block_on(poll_fn(move |cx| {
+            gv.poll_want(cx)
+        })).expect_err("wait");
     }
 
     #[test]
@@ -352,37 +354,37 @@ mod tests {
             // rx thread
             thread::spawn(move || {
                 let mut cnt = 0;
-                poll_fn(move || {
+                block_on(poll_fn(move |cx| {
                     while cnt < nwants {
-                        let n = match rx.poll().expect("rx poll") {
+                        let n = match rx.poll_next(cx).expect("rx poll") {
                             Async::Ready(n) => n.expect("rx opt"),
-                            Async::NotReady => {
+                            Async::Pending => {
                                 tk.want();
-                                return Ok(Async::NotReady);
+                                return Ok(Async::Pending);
                             },
                         };
                         assert_eq!(cnt, n);
                         cnt += 1;
                     }
                     Ok::<_, ()>(Async::Ready(()))
-                }).wait().expect("rx wait");
+                })).expect("rx wait");
             });
 
             // tx thread
             thread::spawn(move || {
                 let mut cnt = 0;
-                let nsent = poll_fn(move || {
+                let nsent = block_on(poll_fn(move |cx| {
                     loop {
                         while let Ok(()) = tx.try_send(cnt) {
                             cnt += 1;
                         }
-                        match gv.poll_want() {
+                        match gv.poll_want(cx) {
                             Ok(Async::Ready(_)) => (),
-                            Ok(Async::NotReady) => return Ok::<_, ()>(Async::NotReady),
+                            Ok(Async::Pending) => return Ok::<_, ()>(Async::Pending),
                             Err(_) => return Ok(Async::Ready(cnt)),
                         }
                     }
-                }).wait().expect("tx wait");
+                })).expect("tx wait");
 
                 assert_eq!(nsent, nwants);
             }).join().expect("thread join");

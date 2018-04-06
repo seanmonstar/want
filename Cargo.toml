@@ -10,6 +10,6 @@ homepage = "https://github.com/seanmonstar/want"
 documentation = "https://docs.rs/want"
 
 [dependencies]
-futures = "0.1"
+futures = "0.2.0-beta"
 log = "0.4"
 try-lock = "0.1"

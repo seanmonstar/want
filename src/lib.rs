@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/want/0.0.2")]
+#![doc(html_root_url = "https://docs.rs/want/0.1.0")]
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
@@ -19,7 +19,8 @@
 //! make sure that the `tx` only creates the message and sends it when the `rx`
 //! has `poll()` for it, and the buffer was empty.
 
-extern crate futures;
+extern crate futures_core;
+#[cfg(test)] extern crate futures;
 #[macro_use]
 extern crate log;
 extern crate try_lock;
@@ -29,8 +30,8 @@ use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use futures::{Async, Poll};
-use futures::task::{self, Waker};
+use futures_core::{Async, Poll};
+use futures_core::task::{self, Waker};
 
 use try_lock::TryLock;
 
@@ -276,7 +277,7 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use std::thread;
-    use futures::{Async, Stream};
+    use futures_core::{Async, Stream};
     use futures::future::poll_fn;
     use futures::executor::block_on;
     use futures::channel::{mpsc, oneshot};

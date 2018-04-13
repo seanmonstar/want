@@ -112,18 +112,15 @@ impl Giver {
     ///   returns `Async::NotReady`, and parks the current task to be notified
     ///   when the `Taker` does call `want()`.
     /// - If the `Taker` has canceled (or dropped), this returns `Closed`.
+    ///
+    /// After knowing that the Taker is wanting, the state can be reset by
+    /// calling [`give`](Giver::give).
     pub fn poll_want(&mut self) -> Poll<(), Closed> {
         loop {
             let state = self.inner.state.load(Ordering::SeqCst).into();
             match state {
                 State::Want => {
                     trace!("poll_want: taker wants!");
-                    // only set to IDLE if it is still Want
-                    self.inner.state.compare_and_swap(
-                        State::Want.into(),
-                        State::Idle.into(),
-                        Ordering::SeqCst,
-                    );
                     return Ok(Async::Ready(()));
                 },
                 State::Closed => {
@@ -142,9 +139,8 @@ impl Giver {
                         );
                         // If it's still the first state (Idle or Give), park current task.
                         if old == state.into() {
-                            trace!("poll_want: taker doesn't want, parking task");
                             let park = locked.as_ref()
-                                .map(|t| t.will_notify_current())
+                                .map(|t| !t.will_notify_current())
                                 .unwrap_or(true);
                             if park {
                                 mem::replace(&mut *locked, Some(task::current()))
@@ -170,6 +166,19 @@ impl Giver {
         }
     }
 
+    /// Mark the state as idle, if the Taker currently is wanting.
+    ///
+    /// Returns true if Taker was wanting, false otherwise.
+    #[inline]
+    pub fn give(&self) -> bool {
+        // only set to IDLE if it is still Want
+        self.inner.state.compare_and_swap(
+            State::Want.into(),
+            State::Idle.into(),
+            Ordering::SeqCst,
+        ) == State::Want.into()
+    }
+
     /// Check if the `Taker` has called `want()` without parking a task.
     ///
     /// This is safe to call outside of a futures task context, but other
@@ -178,6 +187,7 @@ impl Giver {
     pub fn is_wanting(&self) -> bool {
         self.inner.state.load(Ordering::SeqCst) == State::Want.into()
     }
+
 
     /// Check if the `Taker` has canceled interest without parking a task.
     #[inline]
@@ -288,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn want_notify() {
+    fn want_notify_0() {
         let (mut gv, mut tk) = new();
         let (tx, rx) = oneshot::channel();
 
@@ -299,10 +309,57 @@ mod tests {
             rx.wait().expect("rx");
         });
 
-        poll_fn(move || {
+        poll_fn(|| {
             gv.poll_want()
         }).wait().expect("wait");
+
+        assert!(gv.is_wanting(), "still wanting after poll_want success");
+        assert!(gv.give(), "give is true when wanting");
+
+        assert!(!gv.is_wanting(), "no longer wanting after give");
+        assert!(!gv.is_canceled(), "give doesn't cancel");
+
+        assert!(!gv.give(), "give is false if not wanting");
+
         tx.send(()).expect("tx");
+        panic!("boom");
+    }
+
+    /// This tests that if the Giver moves tasks after parking,
+    /// it will still wake up the correct task.
+    #[test]
+    fn want_notify_moving_tasks() {
+        use std::sync::Arc;
+        use futures::executor::{spawn, Notify, NotifyHandle};
+
+        struct WantNotify;
+
+        impl Notify for WantNotify {
+            fn notify(&self, _id: usize) {
+            }
+        }
+
+        fn n() -> NotifyHandle {
+            Arc::new(WantNotify).into()
+        }
+
+        let (mut gv, mut tk) = new();
+
+        let mut s = spawn(poll_fn(move || {
+            gv.poll_want()
+        }));
+
+        // Register with t1 as the task::current()
+        let t1 = n();
+        assert!(s.poll_future_notify(&t1, 1).unwrap().is_not_ready());
+
+        thread::spawn(move || {
+            thread::sleep(::std::time::Duration::from_millis(100));
+            tk.want();
+        });
+
+        // And now, move to a ThreadNotify task.
+        s.into_inner().wait().expect("poll_want");
     }
 
     #[test]

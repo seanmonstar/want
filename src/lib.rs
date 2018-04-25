@@ -61,6 +61,15 @@ pub struct Taker {
     inner: Arc<Inner>,
 }
 
+/// A cloneable `Giver`.
+///
+/// It differs from `Giver` in that you cannot poll for `want`. It's only
+/// usable as a cancellation watcher.
+#[derive(Clone)]
+pub struct SharedGiver {
+    inner: Arc<Inner>,
+}
+
 /// The `Taker` has canceled its interest in a value.
 pub struct Closed {
     _inner: (),
@@ -194,11 +203,47 @@ impl Giver {
     pub fn is_canceled(&self) -> bool {
         self.inner.state.load(Ordering::SeqCst) == State::Closed.into()
     }
+
+    /// Converts this into a `SharedGiver`.
+    #[inline]
+    pub fn shared(self) -> SharedGiver {
+        SharedGiver {
+            inner: self.inner,
+        }
+    }
 }
 
 impl fmt::Debug for Giver {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Giver")
+            .field("state", &self.inner.state())
+            .finish()
+    }
+}
+
+// ===== impl SharedGiver ======
+
+impl SharedGiver {
+    /// Check if the `Taker` has called `want()` without parking a task.
+    ///
+    /// This is safe to call outside of a futures task context, but other
+    /// means of being notified is left to the user.
+    #[inline]
+    pub fn is_wanting(&self) -> bool {
+        self.inner.state.load(Ordering::SeqCst) == State::Want.into()
+    }
+
+
+    /// Check if the `Taker` has canceled interest without parking a task.
+    #[inline]
+    pub fn is_canceled(&self) -> bool {
+        self.inner.state.load(Ordering::SeqCst) == State::Closed.into()
+    }
+}
+
+impl fmt::Debug for SharedGiver {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("SharedGiver")
             .field("state", &self.inner.state())
             .finish()
     }

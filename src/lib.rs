@@ -269,6 +269,10 @@ impl Taker {
     /// Signal to the `Giver` that a value is wanted.
     #[inline]
     pub fn want(&mut self) {
+        debug_assert!(
+            self.inner.state.load(SeqCst) != State::Closed.into(),
+            "want called after cancel"
+        );
         trace!("signal: {:?}", State::Want);
         self.signal(State::Want)
     }

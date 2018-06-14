@@ -12,4 +12,4 @@ documentation = "https://docs.rs/want"
 [dependencies]
 futures = "0.1"
 log = "0.4"
-try-lock = "0.1"
+try-lock = "0.2"

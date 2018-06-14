@@ -27,7 +27,10 @@ extern crate try_lock;
 use std::fmt;
 use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+// SeqCst is the only ordering used to ensure accessing the state and
+// TryLock are never re-ordered.
+use std::sync::atomic::Ordering::SeqCst;
 
 use futures::{Async, Poll};
 use futures::task::{self, Task};
@@ -126,7 +129,7 @@ impl Giver {
     /// calling [`give`](Giver::give).
     pub fn poll_want(&mut self) -> Poll<(), Closed> {
         loop {
-            let state = self.inner.state.load(Ordering::SeqCst).into();
+            let state = self.inner.state.load(SeqCst).into();
             match state {
                 State::Want => {
                     trace!("poll_want: taker wants!");
@@ -138,13 +141,13 @@ impl Giver {
                 },
                 State::Idle | State::Give => {
                     // Taker doesn't want anything yet, so park.
-                    if let Some(mut locked) = self.inner.task.try_lock() {
+                    if let Some(mut locked) = self.inner.task.try_lock_order(SeqCst, SeqCst) {
 
                         // While we have the lock, try to set to GIVE.
                         let old = self.inner.state.compare_and_swap(
                             state.into(),
                             State::Give.into(),
-                            Ordering::SeqCst,
+                            SeqCst,
                         );
                         // If it's still the first state (Idle or Give), park current task.
                         if old == state.into() {
@@ -152,13 +155,14 @@ impl Giver {
                                 .map(|t| !t.will_notify_current())
                                 .unwrap_or(true);
                             if park {
-                                mem::replace(&mut *locked, Some(task::current()))
-                                    .map(|prev_task| {
-                                        // there was an old task parked here.
-                                        // it might be waiting to be notified,
-                                        // so poke it before dropping.
-                                        prev_task.notify();
-                                    });
+                                let old = mem::replace(&mut *locked, Some(task::current()));
+                                drop(locked);
+                                old.map(|prev_task| {
+                                    // there was an old task parked here.
+                                    // it might be waiting to be notified,
+                                    // so poke it before dropping.
+                                    prev_task.notify();
+                                });
                             }
                             return Ok(Async::NotReady)
                         }
@@ -184,7 +188,7 @@ impl Giver {
         self.inner.state.compare_and_swap(
             State::Want.into(),
             State::Idle.into(),
-            Ordering::SeqCst,
+            SeqCst,
         ) == State::Want.into()
     }
 
@@ -194,14 +198,14 @@ impl Giver {
     /// means of being notified is left to the user.
     #[inline]
     pub fn is_wanting(&self) -> bool {
-        self.inner.state.load(Ordering::SeqCst) == State::Want.into()
+        self.inner.state.load(SeqCst) == State::Want.into()
     }
 
 
     /// Check if the `Taker` has canceled interest without parking a task.
     #[inline]
     pub fn is_canceled(&self) -> bool {
-        self.inner.state.load(Ordering::SeqCst) == State::Closed.into()
+        self.inner.state.load(SeqCst) == State::Closed.into()
     }
 
     /// Converts this into a `SharedGiver`.
@@ -230,14 +234,14 @@ impl SharedGiver {
     /// means of being notified is left to the user.
     #[inline]
     pub fn is_wanting(&self) -> bool {
-        self.inner.state.load(Ordering::SeqCst) == State::Want.into()
+        self.inner.state.load(SeqCst) == State::Want.into()
     }
 
 
     /// Check if the `Taker` has canceled interest without parking a task.
     #[inline]
     pub fn is_canceled(&self) -> bool {
-        self.inner.state.load(Ordering::SeqCst) == State::Closed.into()
+        self.inner.state.load(SeqCst) == State::Closed.into()
     }
 }
 
@@ -271,13 +275,14 @@ impl Taker {
 
     #[inline]
     fn signal(&mut self, state: State) {
-        let old_state = self.inner.state.swap(state.into(), Ordering::SeqCst).into();
+        let old_state = self.inner.state.swap(state.into(), SeqCst).into();
         match old_state {
             State::Idle | State::Want | State::Closed => (),
             State::Give => {
                 loop {
-                    if let Some(mut locked) = self.inner.task.try_lock() {
+                    if let Some(mut locked) = self.inner.task.try_lock_order(SeqCst, SeqCst) {
                         if let Some(task) = locked.take() {
+                            drop(locked);
                             trace!("signal found waiting giver, notifying");
                             task.notify();
                         }
@@ -323,7 +328,7 @@ impl fmt::Debug for Closed {
 impl Inner {
     #[inline]
     fn state(&self) -> State {
-        self.state.load(Ordering::SeqCst).into()
+        self.state.load(SeqCst).into()
     }
 }
 
@@ -367,7 +372,6 @@ mod tests {
         assert!(!gv.give(), "give is false if not wanting");
 
         tx.send(()).expect("tx");
-        panic!("boom");
     }
 
     /// This tests that if the Giver moves tasks after parking,

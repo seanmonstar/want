@@ -1,4 +1,4 @@
-#![doc(html_root_url = "https://docs.rs/want/0.0.5")]
+#![doc(html_root_url = "https://docs.rs/want/0.0.6")]
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]

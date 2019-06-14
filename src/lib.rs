@@ -2,6 +2,7 @@
 #![deny(warnings)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
+#![feature(async_await)]
 
 //! A Futures channel-like utility to signal when a value is wanted.
 //!
@@ -21,7 +22,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```xxxxxxxx
 //! extern crate futures;
 //! extern crate want;
 //!
@@ -84,21 +85,20 @@
 //! # fn main() {}
 //! ```
 
-extern crate futures;
 #[macro_use]
 extern crate log;
-extern crate try_lock;
 
 use std::fmt;
+use std::future::Future;
 use std::mem;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 // SeqCst is the only ordering used to ensure accessing the state and
 // TryLock are never re-ordered.
 use std::sync::atomic::Ordering::SeqCst;
+use std::task::{self, Poll, Waker};
 
-use futures::{Async, Poll};
-use futures::task::{self, Task};
 
 use try_lock::TryLock;
 
@@ -176,12 +176,17 @@ impl From<usize> for State {
 
 struct Inner {
     state: AtomicUsize,
-    task: TryLock<Option<Task>>,
+    task: TryLock<Option<Waker>>,
 }
 
 // ===== impl Giver ======
 
 impl Giver {
+    /// dox
+    pub async fn want(&mut self) -> Result<(), Closed> {
+        Want(self).await
+    }
+
     /// Poll whether the `Taker` has registered interest in another value.
     ///
     /// - If the `Taker` has called `want()`, this returns `Async::Ready(())`.
@@ -192,17 +197,17 @@ impl Giver {
     ///
     /// After knowing that the Taker is wanting, the state can be reset by
     /// calling [`give`](Giver::give).
-    pub fn poll_want(&mut self) -> Poll<(), Closed> {
+    pub fn poll_want(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), Closed>> {
         loop {
             let state = self.inner.state.load(SeqCst).into();
             match state {
                 State::Want => {
                     trace!("poll_want: taker wants!");
-                    return Ok(Async::Ready(()));
+                    return Poll::Ready(Ok(()));
                 },
                 State::Closed => {
                     trace!("poll_want: closed");
-                    return Err(Closed { _inner: () });
+                    return Poll::Ready(Err(Closed { _inner: () }));
                 },
                 State::Idle | State::Give => {
                     // Taker doesn't want anything yet, so park.
@@ -217,19 +222,19 @@ impl Giver {
                         // If it's still the first state (Idle or Give), park current task.
                         if old == state.into() {
                             let park = locked.as_ref()
-                                .map(|t| !t.will_notify_current())
+                                .map(|w| !w.will_wake(cx.waker()))
                                 .unwrap_or(true);
                             if park {
-                                let old = mem::replace(&mut *locked, Some(task::current()));
+                                let old = mem::replace(&mut *locked, Some(cx.waker().clone()));
                                 drop(locked);
                                 old.map(|prev_task| {
                                     // there was an old task parked here.
                                     // it might be waiting to be notified,
                                     // so poke it before dropping.
-                                    prev_task.notify();
+                                    prev_task.wake();
                                 });
                             }
-                            return Ok(Async::NotReady)
+                            return Poll::Pending;
                         }
                         // Otherwise, something happened! Go around the loop again.
                     } else {
@@ -353,7 +358,7 @@ impl Taker {
                         if let Some(task) = locked.take() {
                             drop(locked);
                             trace!("signal found waiting giver, notifying");
-                            task.notify();
+                            task.wake();
                         }
                         return;
                     } else {
@@ -401,19 +406,43 @@ impl Inner {
     }
 }
 
+// ===== impl PollFn ======
+
+struct Want<'a>(&'a mut Giver);
+
+
+impl Future for Want<'_> {
+    type Output = Result<(), Closed>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
+        self.0.poll_want(cx)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
-    use futures::{Async, Stream};
-    use futures::future::{poll_fn, Future};
-    use futures::sync::{mpsc, oneshot};
+    //use futures::{Async, Stream};
+    //use futures::future::{poll_fn, Future};
+    //use futures::sync::{mpsc, oneshot};
+    use tokio_sync::oneshot;
     use super::*;
+
+    fn block_on<F: Future>(f: F) -> F::Output {
+        tokio_executor::enter()
+            .expect("block_on enter")
+            .block_on(f)
+    }
 
     #[test]
     fn want_ready() {
         let (mut gv, mut tk) = new();
+
         tk.want();
-        assert!(gv.poll_want().unwrap().is_ready());
+
+        block_on(async {
+            gv.want().await
+        }).unwrap();
     }
 
     #[test]
@@ -425,12 +454,12 @@ mod tests {
             tk.want();
             // use a oneshot to keep this thread alive
             // until other thread was notified of want
-            rx.wait().expect("rx");
+            block_on(rx).expect("rx");
         });
 
-        poll_fn(|| {
-            gv.poll_want()
-        }).wait().expect("wait");
+        block_on(async {
+            gv.want().await.expect("want")
+        });
 
         assert!(gv.is_wanting(), "still wanting after poll_want success");
         assert!(gv.give(), "give is true when wanting");
@@ -443,6 +472,7 @@ mod tests {
         tx.send(()).expect("tx");
     }
 
+    /*
     /// This tests that if the Giver moves tasks after parking,
     /// it will still wake up the correct task.
     #[test]
@@ -479,6 +509,7 @@ mod tests {
         // And now, move to a ThreadNotify task.
         s.into_inner().wait().expect("poll_want");
     }
+    */
 
     #[test]
     fn cancel() {
@@ -490,7 +521,7 @@ mod tests {
         tk.cancel();
 
         assert!(gv.is_canceled());
-        assert!(gv.poll_want().is_err());
+        block_on(gv.want()).unwrap_err();
 
         // implicit
         let (mut gv, tk) = new();
@@ -500,7 +531,7 @@ mod tests {
         drop(tk);
 
         assert!(gv.is_canceled());
-        assert!(gv.poll_want().is_err());
+        block_on(gv.want()).unwrap_err();
 
         // notifies
         let (mut gv, tk) = new();
@@ -510,11 +541,10 @@ mod tests {
             // and dropped
         });
 
-        poll_fn(move || {
-            gv.poll_want()
-        }).wait().expect_err("wait");
+        block_on(gv.want()).unwrap_err();
     }
 
+    /*
     #[test]
     fn stress() {
         let nthreads = 5;
@@ -563,4 +593,5 @@ mod tests {
             }).join().expect("thread join");
         }
     }
+    */
 }

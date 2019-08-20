@@ -17,5 +17,5 @@ log = "0.4"
 try-lock = "0.2"
 
 [dev-dependencies]
-tokio-executor = { git = "https://github.com/tokio-rs/tokio" }
-tokio-sync = { git = "https://github.com/tokio-rs/tokio" }
+tokio-executor = "0.2.0-alpha.2"
+tokio-sync = "0.2.0-alpha.2"

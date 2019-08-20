@@ -1,16 +1,13 @@
 [package]
 name = "want"
-version = "0.2.0" # remember to update html_root_url
+version = "0.3.0" # remember to update html_root_url
 description = "Detect when another Future wants a result."
-keywords = ["futures", "channel"]
+keywords = ["futures", "channel", "async"]
 authors = ["Sean McArthur <sean@seanmonstar.com>"]
 license = "MIT"
 repository = "https://github.com/seanmonstar/want"
-homepage = "https://github.com/seanmonstar/want"
 documentation = "https://docs.rs/want"
 edition = "2018"
-
-publish = false
 
 [dependencies]
 log = "0.4"

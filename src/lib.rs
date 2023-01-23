@@ -206,16 +206,17 @@ impl Giver {
                 },
                 State::Idle | State::Give => {
                     // Taker doesn't want anything yet, so park.
-                    if let Some(mut locked) = self.inner.task.try_lock_order(SeqCst, SeqCst) {
+                    if let Some(mut locked) = self.inner.task.try_lock_explicit(SeqCst, SeqCst) {
 
                         // While we have the lock, try to set to GIVE.
-                        let old = self.inner.state.compare_and_swap(
+                        let old = self.inner.state.compare_exchange(
                             state.into(),
                             State::Give.into(),
                             SeqCst,
+                            SeqCst,
                         );
                         // If it's still the first state (Idle or Give), park current task.
-                        if old == state.into() {
+                        if old == Ok(state.into()) {
                             let park = locked.as_ref()
                                 .map(|w| !w.will_wake(cx.waker()))
                                 .unwrap_or(true);
@@ -250,11 +251,12 @@ impl Giver {
     #[inline]
     pub fn give(&self) -> bool {
         // only set to IDLE if it is still Want
-        self.inner.state.compare_and_swap(
+        let old = self.inner.state.compare_exchange(
             State::Want.into(),
             State::Idle.into(),
             SeqCst,
-        ) == State::Want.into()
+            SeqCst);
+        old == Ok(State::Want.into())
     }
 
     /// Check if the `Taker` has called `want()` without parking a task.
@@ -349,7 +351,7 @@ impl Taker {
             State::Idle | State::Want | State::Closed => (),
             State::Give => {
                 loop {
-                    if let Some(mut locked) = self.inner.task.try_lock_order(SeqCst, SeqCst) {
+                    if let Some(mut locked) = self.inner.task.try_lock_explicit(SeqCst, SeqCst) {
                         if let Some(task) = locked.take() {
                             drop(locked);
                             trace!("signal found waiting giver, notifying");

@@ -106,7 +106,7 @@ pub fn new() -> (Giver, Taker) {
     let inner2 = inner.clone();
     (
         Giver {
-            inner: inner,
+            inner,
         },
         Taker {
             inner: inner2,
@@ -178,7 +178,7 @@ struct Inner {
 
 impl Giver {
     /// Returns a `Future` that fulfills when the `Taker` has done some action.
-    pub fn want<'a>(&'a mut self) -> impl Future<Output = Result<(), Closed>> + 'a {
+    pub fn want(&mut self) -> impl Future<Output = Result<(), Closed>> + '_ {
         Want(self)
     }
 
@@ -223,12 +223,12 @@ impl Giver {
                             if park {
                                 let old = mem::replace(&mut *locked, Some(cx.waker().clone()));
                                 drop(locked);
-                                old.map(|prev_task| {
+                                if let Some(prev_task) = old {
                                     // there was an old task parked here.
                                     // it might be waiting to be notified,
                                     // so poke it before dropping.
                                     prev_task.wake();
-                                });
+                                };
                             }
                             return Poll::Pending;
                         }
@@ -285,7 +285,7 @@ impl Giver {
 }
 
 impl fmt::Debug for Giver {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Giver")
             .field("state", &self.inner.state())
             .finish()
@@ -313,7 +313,7 @@ impl SharedGiver {
 }
 
 impl fmt::Debug for SharedGiver {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SharedGiver")
             .field("state", &self.inner.state())
             .finish()
@@ -378,7 +378,7 @@ impl Drop for Taker {
 }
 
 impl fmt::Debug for Taker {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Taker")
             .field("state", &self.inner.state())
             .finish()
@@ -388,7 +388,7 @@ impl fmt::Debug for Taker {
 // ===== impl Closed ======
 
 impl fmt::Debug for Closed {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Closed")
             .finish()
     }

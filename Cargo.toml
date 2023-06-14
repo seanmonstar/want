@@ -10,8 +10,7 @@ documentation = "https://docs.rs/want"
 edition = "2018"
 
 [dependencies]
-log = "0.4"
-try-lock = "0.2"
+try-lock = "0.2.4"
 
 [dev-dependencies]
 tokio-executor = "0.2.0-alpha.2"

@@ -80,9 +80,6 @@
 //! # fn main() {}
 //! ```
 
-#[macro_use]
-extern crate log;
-
 use std::fmt;
 use std::future::Future;
 use std::mem;
@@ -197,11 +194,9 @@ impl Giver {
             let state = self.inner.state.load(SeqCst).into();
             match state {
                 State::Want => {
-                    trace!("poll_want: taker wants!");
                     return Poll::Ready(Ok(()));
                 },
                 State::Closed => {
-                    trace!("poll_want: closed");
                     return Poll::Ready(Err(Closed { _inner: () }));
                 },
                 State::Idle | State::Give => {
@@ -329,7 +324,6 @@ impl Taker {
     /// drop the value yet.
     #[inline]
     pub fn cancel(&mut self) {
-        trace!("signal: {:?}", State::Closed);
         self.signal(State::Closed)
     }
 
@@ -340,7 +334,6 @@ impl Taker {
             self.inner.state.load(SeqCst) != State::Closed.into(),
             "want called after cancel"
         );
-        trace!("signal: {:?}", State::Want);
         self.signal(State::Want)
     }
 
@@ -354,7 +347,6 @@ impl Taker {
                     if let Some(mut locked) = self.inner.task.try_lock_explicit(SeqCst, SeqCst) {
                         if let Some(task) = locked.take() {
                             drop(locked);
-                            trace!("signal found waiting giver, notifying");
                             task.wake();
                         }
                         return;

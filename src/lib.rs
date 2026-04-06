@@ -328,6 +328,8 @@ impl Taker {
     }
 
     /// Signal to the `Giver` that a value is wanted.
+    ///
+    /// This MAY panic if the want was cancelled and the channel is considered closed.
     #[inline]
     pub fn want(&mut self) {
         debug_assert!(
